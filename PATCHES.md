@@ -70,19 +70,107 @@ python3 -c 'import socket,time; s=socket.socket(); \
 ps | grep satpi.bin   # must stay alive (old binary died here)
 ```
 
+## Bug: DiSEqC broken on FBC hardware (Vu+ Duo 4K SE)
+
+Upstream SatPI could not drive a DiSEqC switch on FBC tuner inputs. Three
+independent root causes, all fixed by matching the proven minisatip
+implementation (`minisatip/src/dvb.cpp`, `adapter.cpp`):
+
+### Root cause 1 — DiSEqC sent to the wrong frontend fd
+
+`FBC::getFileDescriptorOfRootTuner()` built the root path from a fixed
+`_offset` (`fbcSetID * 8`), so a request on frontend9 sent DiSEqC to
+frontend8. It also replaced only the last character of the path, so for
+two-digit children (frontend10+) `fePath.replace(end-1, end, N)` produced
+e.g. `frontend19`.
+
+Fix: use `_fbcConnect` (the real root read from `fbc_connect` proc) and
+replace the whole `frontendN` suffix.
+
+### Root cause 2 — fd lifetime / shared file context
+
+Upstream opened a *fresh* fd to the root for DiSEqC, sent the command and
+closed it. minisatip instead keeps `ad->fe` open for the adapter lifetime
+and sends DiSEqC on `master->fe` — the driver's per-open file context
+(LNB voltage/tone state) stays alive.
+
+Fix: `getFileDescriptorOfRootTuner()` now scans `/proc/self/fd` and
+`dup()`s the already-open fd of the root frontend; if none is open it
+opens once and caches the base fd in `rootFdCache` for the process
+lifetime. The caller closes only the dup.
+
+`FBC::doSendDiSEqcViaRootTuner()` now returns true only for **child**
+tuners (`!_fbcRoot`) — a root sends DiSEqC on its own fd.
+
+### Root cause 3 — FBC link state not applied at tune time
+
+Upstream wrote `fbc_link`/`fbc_connect` only when the XML config changed.
+After a reboot or an Enigma2 run the proc values could be stale/reset.
+
+Fix: `FBC::applyFBCConfiguration()` is called at the start of
+`DVBS::tune()` — root: `fbc_link=0`, `fbc_connect=<own index>`; child:
+`fbc_link=<linked?>`, `fbc_connect=<root index>`.
+
+### DiSEqC wire sequence aligned with minisatip
+
+`DiSEqc::sendDiseqcMasterCommand()` now takes `targetVoltage` + `hiband`
+and does:
+
+```
+FE_SET_TONE OFF -> FE_SET_VOLTAGE (13V/18V by polarization) ->
+FE_DISEQC_SEND_MASTER_CMD -> mini-burst -> FE_SET_TONE (hiband)
+```
+
+instead of forcing 18V before and 13V after the command. Default delays
+changed 35/40 ms -> 15/54 ms (minisatip `diseqc_timing`). Mini-burst is
+selected by position parity `(src & 1)` like minisatip
+(`pos & 1 ? MiniB : MiniA`), not the upstream `src & 0x80`.
+
+### Note on the committed-switch position byte
+
+`DVBS::tune()` passes `getDiSEqcSource() - 1`, i.e. `src` inside
+`sendDiseqc()` is **already 0-based**. The committed position encoding is
+therefore `(src & 0x03) << 2` (A=0xF0, B=0xF4, C=0xF8, D=0xFC) — identical
+to minisatip's `0xf0 | (pos << 2 & 0x0c)`. Do not subtract 1 again.
+
+### `fe=N` HTTP parameter is 1-based
+
+`StreamManager::findFrontendID()` maps `fe=N` to `_streamVector[N-1]`,
+i.e. `fe=10` is `/dev/dvb/adapter0/frontend9`. Keep this in mind when
+testing — `fe=9` addresses frontend8.
+
+### Empirical verification (Vu+ Duo 4K SE, OpenPLi 9.2)
+
+frontend1 (4-port DiSEqC A/B/C/D switch on Slot A input B):
+
+| src | pos | sat   | transponder    | result                |
+|-----|-----|-------|----------------|-----------------------|
+| 1   | A   | 23.5E | 11739V/29900   | 2044 real TS pkts, 0x1F |
+| 3   | C   | 19.2E | 11347V/22000   | 6139 real TS pkts, 0x1F |
+| 4   | D   | 13E   | 12188V/27500   | 4095 real TS pkts, 0x1F |
+
+Wire bytes observed in the log: `0xF1` (A+hiband), `0xF8` (C),
+`0xFD` (D+hiband). Child frontend10 correctly routes DiSEqC through
+root frontend9 and locks.
+
+## Two-step demux open (NEXUS/Enigma2-style)
+
+`Frontend::updatePIDFilters()` opens `/dev/dvb/adapter0/demux0`, issues
+`DMX_SET_SOURCE` with the frontend index, closes, then re-opens demux0
+and sets the PES filter. A direct open+`DMX_SET_SOURCE` on the per-frontend
+demux path fails on this driver. All frontends share demux0; the source
+selection is per open fd.
+
 ## Notes on this installation (Vu+ Duo 4K SE, OpenPLi 9.2)
 
-- `/usr/bin/satpi` is a Python wrapper that ignores `SIGPIPE` and execs
-  `/usr/bin/satpi.bin` (separate crash source — keep it).
-- `/etc/init.d/satpi` must use `killall satpi.bin` (not `killall satpi`),
-  otherwise stopped instances survive and the next instance cannot bind
-  port 8875.
-- SatPI frontends in `/etc/satpi/SatPI.xml`: only `frontend9` (physical
-  Tuner B lower input) enabled. FBC children `frontend2-7` belong to the
-  Enigma2-owned input and children `frontend10-15` cannot send DiSEqC on
-  this driver — all must stay disabled or clients get
-  `503 No-More: frontends` and leaked `attached=yes` frontends.
-- `waitOnLockTimeout` raised to 3000 ms: DiSEqC transmit on this input
-  logs a benign `bcm7335_send_diseqc_msg` timeout (~1.1 s) before tuning.
-- Cron watchdog in root crontab restarts SatPI if it ever stops:
-  `* * * * * /etc/init.d/satpi status >/dev/null 2>&1 || /etc/init.d/satpi start`
+- Binary deployed as `/usr/bin/satpi_patched`, started by
+  `/etc/init.d/satpi` (rc symlinks in rcS.d/rc2-5.d).
+- `/etc/init.d/satpi` stops Enigma2 before starting SatPI (shared tuners).
+- If Enigma2 is running it holds `/dev/dvb/adapter0/frontend1`, so
+  requests for that frontend fall back to the first free stream — check
+  `http://BOX:8875/log.json` to see which frontend actually served a
+  request.
+- `diseqcType` in `SatPI.xml`: `0`=DiSEqc Switch, `3`=Lnb. Configure per
+  stream; the C++ default stays `Lnb` like upstream.
+- Source tarball of this tree: `/etc/satpi/satpi_src_v2_working.tar.gz`
+  on the box.

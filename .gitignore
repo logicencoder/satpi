@@ -15,3 +15,6 @@ plantuml.jar
 cppcheck.log
 test.ts
 .DS_Store
+nonstd/
+satpi
+/obj/
