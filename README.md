@@ -2,7 +2,41 @@
 |-------|-------|-------|
 | [![Build Status](https://travis-ci.org/Barracuda09/SATPI.svg)](https://travis-ci.org/Barracuda09/SATPI) | [![Coverity Scan](https://scan.coverity.com/projects/4842/badge.svg)](https://scan.coverity.com/projects/4842) | [![PayPal](https://img.shields.io/badge/donate-PayPal-blue.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=H9AX9N7HWSWXE&item_name=SatPI&item_number=SatPI&currency_code=EUR&bn=PP%2dDonationsBF%3abtn_donateCC_LG%2egif%3aNonHosted) |
 
-# SatPI
+# SatPI (Logic Encoder fork)
+
+Fork of [Barracuda09/SATPI](https://github.com/Barracuda09/SATPI) with fixes
+for the **Vu+ Duo 4K SE** (Broadcom bcm7335 / NEXUS, dual FBC DVB-S2) — the
+second FBC bank (frontend8+) previously delivered no data at all and
+DiSEqC switching was broken. This fork makes SatPI fully usable on that box
+with Enigma2 running alongside (verified on OpenPLi 9.2, DVBViewer client).
+
+## Fork changes (on top of upstream)
+
+| Area | Fix |
+|------|-----|
+| `socket/SocketClient.h` | SIGSEGV on whitespace-only RTSP keepalive (`headers[0]` on empty vector) |
+| `main.cpp` | Ignore `SIGPIPE` — client closing TCP mid-write no longer kills the daemon |
+| `input/dvb/Frontend.cpp`, `mpegts/Filter.cpp` | NEXUS demux model: same-fd `DMX_SET_SOURCE`, mid-stream `ADD_PID`, safe `pids=all` emulation |
+| `input/dvb/delivery/` | DiSEqC + FBC: child tuners route DiSEqC through `dup()` of the already-open root frontend fd (minisatip parity), correct tone→voltage→cmd→mini-burst ordering |
+| `TransportParamVector.cpp`, `FrontendData.cpp` | Case-insensitive SAT>IP transport values (`pol`, `msys`, `plts`, `fec`, `ro`, `mtype`, …) |
+| `Frontend.cpp`, `FrontendData.h/.cpp` | If the lock wait times out and the request carried explicit hint params (`plts`/`fec`/`ro`), retune once with them relaxed to AUTO — clients like DVBViewer forward stale channel-list values (e.g. `plts=off` on pilots-on transponders) that over-restrict the demod search and can never lock |
+
+## Vu+ Duo 4K SE deployment notes
+
+- Build with `arm-gnu-toolchain-13.3` and `-static -static-libstdc++ -static-libgcc`
+  (box glibc is older than the toolchain's).
+- Enable only the FBC **root** frontend of the bank you want — on bcm7335 the
+  FBC children cannot emit DiSEqC (`bcm7335_send_diseqc_msg` times out).
+  Reference config: `docs/SatPI.xml.vu-dueo4kse`, init script:
+  `docs/satpi.initd.vu-duo4kse`. Start satpi with `--iface-name eth0` so the
+  SSDP `LOCATION` advertises a usable address.
+- Full write-up: `docs/SATPI_TASK_HANDOFF.md`.
+
+Should also run on other images using the same driver stack (OpenATV, VTi).
+
+---
+
+# SatPI (upstream)
 
 An SAT>IP server for linux, suitable for running on an Raspberry Pi, VU+, GigaBlue or any other linux box.
 
