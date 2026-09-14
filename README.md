@@ -1,186 +1,79 @@
-| Build Status | Coverity Scan | PayPal |
-|-------|-------|-------|
-| [![Build Status](https://travis-ci.org/Barracuda09/SATPI.svg)](https://travis-ci.org/Barracuda09/SATPI) | [![Coverity Scan](https://scan.coverity.com/projects/4842/badge.svg)](https://scan.coverity.com/projects/4842) | [![PayPal](https://img.shields.io/badge/donate-PayPal-blue.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=H9AX9N7HWSWXE&item_name=SatPI&item_number=SatPI&currency_code=EUR&bn=PP%2dDonationsBF%3abtn_donateCC_LG%2egif%3aNonHosted) |
+# SatPI — Logic Encoder fork
 
-# SatPI (Logic Encoder fork)
+An SAT>IP server for Linux (DVB-S/S2, DVB-T/T2, DVB-C), forked from
+[Barracuda09/SATPI](https://github.com/Barracuda09/SATPI) — all credit for the
+original project goes to its author.
 
-Fork of [Barracuda09/SATPI](https://github.com/Barracuda09/SATPI) with fixes
-for the **Vu+ Duo 4K SE** (Broadcom bcm7335 / NEXUS, dual FBC DVB-S2) — the
-second FBC bank (frontend8+) previously delivered no data at all and
-DiSEqC switching was broken. This fork makes SatPI fully usable on that box
-with Enigma2 running alongside (verified on OpenPLi 9.2, DVBViewer client).
+This fork exists to make SatPI actually work on the **Vu+ Duo 4K SE**
+(Broadcom bcm7335 / NEXUS, dual FBC DVB-S2) — a box where upstream delivers
+no data at all on the second tuner bank and cannot switch DiSEqC
+([upstream issue #210](https://github.com/Barracuda09/SATPI/issues/210),
+open since 2024). Verified end-to-end on OpenPLi 9.2 with **DVBViewer**
+switching three orbital positions (23.5E / 13E / 19.2E) while Enigma2 runs
+alongside.
 
-## Fork changes (on top of upstream)
+## What this fork fixes
 
 | Area | Fix |
 |------|-----|
 | `socket/SocketClient.h` | SIGSEGV on whitespace-only RTSP keepalive (`headers[0]` on empty vector) |
-| `main.cpp` | Ignore `SIGPIPE` — client closing TCP mid-write no longer kills the daemon |
+| `main.cpp` | Ignore `SIGPIPE` — a client closing TCP mid-write no longer kills the daemon |
 | `input/dvb/Frontend.cpp`, `mpegts/Filter.cpp` | NEXUS demux model: same-fd `DMX_SET_SOURCE`, mid-stream `ADD_PID`, safe `pids=all` emulation |
 | `input/dvb/delivery/` | DiSEqC + FBC: child tuners route DiSEqC through `dup()` of the already-open root frontend fd (minisatip parity), correct tone→voltage→cmd→mini-burst ordering |
 | `TransportParamVector.cpp`, `FrontendData.cpp` | Case-insensitive SAT>IP transport values (`pol`, `msys`, `plts`, `fec`, `ro`, `mtype`, …) |
-| `Frontend.cpp`, `FrontendData.h/.cpp` | If the lock wait times out and the request carried explicit hint params (`plts`/`fec`/`ro`), retune once with them relaxed to AUTO — clients like DVBViewer forward stale channel-list values (e.g. `plts=off` on pilots-on transponders) that over-restrict the demod search and can never lock |
+| `Frontend.cpp`, `FrontendData.h/.cpp` | On lock timeout with explicit hint params (`plts`/`fec`/`ro`), retune once with them relaxed to AUTO — clients like DVBViewer forward stale channel-list values (e.g. `plts=off` on pilots-on transponders) that can never lock |
 
-## Vu+ Duo 4K SE deployment notes
+## Vu+ Duo 4K SE deployment
 
-- Build with `arm-gnu-toolchain-13.3` and `-static -static-libstdc++ -static-libgcc`
-  (box glibc is older than the toolchain's).
+- Cross-build with an ARM toolchain (e.g. `arm-gnu-toolchain-13.3`) and link
+  statically: `-static -static-libstdc++ -static-libgcc` — the box's glibc is
+  older than the toolchain's.
 - Enable only the FBC **root** frontend of the bank you want — on bcm7335 the
-  FBC children cannot emit DiSEqC (`bcm7335_send_diseqc_msg` times out).
-  Reference config: `docs/SatPI.xml.vu-dueo4kse`, init script:
-  `docs/satpi.initd.vu-duo4kse`. Start satpi with `--iface-name eth0` so the
-  SSDP `LOCATION` advertises a usable address.
-- Full write-up: `docs/SATPI_TASK_HANDOFF.md`.
+  FBC children cannot emit DiSEqC (`bcm7335_send_diseqc_msg` times out on the
+  child fd).
+- Start satpi with `--iface-name eth0` so the SSDP `LOCATION` advertises a
+  usable address instead of `0.0.0.0`.
+- Reference config and init script:
+  [`docs/SatPI.xml.vu-dueo4kse`](docs/SatPI.xml.vu-dueo4kse),
+  [`docs/satpi.initd.vu-duo4kse`](docs/satpi.initd.vu-duo4kse).
+- In Enigma2, mark the SatPI-owned tuners `configMode=nothing` so both worlds
+  never open the same frontend.
 
-Should also run on other images using the same driver stack (OpenATV, VTi).
+The same binary should run on other images using the same driver stack
+(OpenATV, VTi) — it is statically linked and only needs `/dev/dvb` plus the
+XML config.
 
----
+## Quick start
 
-# SatPI (upstream)
+```sh
+git clone https://github.com/logicencoder/satpi.git
+cd satpi
+make
+./satpi --help
+./satpi            # needs privilege for tcp/udp port 554
+```
 
-An SAT>IP server for linux, suitable for running on an Raspberry Pi, VU+, GigaBlue or any other linux box.
+- Web interface: `http://<box-ip>:8875` (live frontend status, config editor)
+- Device description (SSDP): `http://<box-ip>:8875/desc.xml`
+- Build variants: `make debug`, `make LIBDVBCSA=yes` (OSCam/dvbapi),
+  `make ENIGMA=yes` (Enigma2 toolchain), `make non-c++17` (old toolchains)
 
-<a href="https://github.com/Barracuda09/SATPI/wiki/02.-Build-SatPI">See wiki on how to build SatPI</a>
+For full upstream documentation see the
+[SatPI wiki](https://github.com/Barracuda09/SATPI/wiki).
 
-Currently supporting:
+## Features (from upstream)
 
-- DVB-S(2), DVB-T(2) and DVB-C
-- Web Interface for monitoring and configuring various things (http port 8875)
-	- http://ip.of.your.box:8875
-- Transform for example DVB-S(2) requests to DVB-C
-- RTP/AVP and RTP/AVP/TCP streaming
-- HTTP streaming
-- Decrypting of channels via DVB-API protocol implemented by OSCam, therefore you need the dvbcsa library and an official subscription
-- ICAM support needs an updated dvbcsa library
-- Virtual tuners
-  - FILE input, reading from an TS File
-  - STREAMER input, reading from an multicast/unicast input
-  - CHILDPIPE input, reading from an PIPE input for example wget and [childpipe-hdhomerun-example.sh](https://github.com/Barracuda09/SATPI/blob/master/scripts/childpipe-hdhomerun-example.sh) in combination with [mapping.m3u](https://github.com/Barracuda09/SATPI/blob/master/mapping.m3u)
--------
-- The Description xml can be found like:
-	- http://ip.of.your.box:8875/desc.xml
+- RTP/AVP, RTP/AVP/TCP and plain HTTP streaming
+- DVB-S(2) requests transformed to DVB-C/T outputs
+- Channel decryption via the DVB-API protocol with OSCam (dvbcsa)
+- Virtual tuners: FILE, STREAMER (multicast/unicast), CHILDPIPE inputs
+- Works with Tvheadend, DVBViewer, VDR, VLC, Elgato Sat>IP, satip-client
 
-- The settings are in SatPI.xml and the Web interface uses this to build the content of the pages:
-	- http://ip.of.your.box:8875/satPI.xml
+## License & credit
 
-- The SatPI wiki can be found here:
-	- https://github.com/Barracuda09/SATPI/wiki
+GPL-2.0, same as upstream. Original project and author:
+[Barracuda09/SATPI](https://github.com/Barracuda09/SATPI) — if SatPI is
+useful to you, consider donating to the original author via the sponsor
+button on the upstream repo.
 
-Help
--------
-Help in any way is appreciated, just send me an email with anything you can
-contribute to the project, like:
-- coding
-- web design
-- ideas / feature requests
-- test reports
-- spread the word!
-- donate
-
-Donate
-------
-
-If you like and use SatPI then please consider making a donation, to support my effort in
-developing SatPI.<br>
-Many thanks to all who donated already.<br>
-<br>
-Please find the Sponsor button here:
-<a href="https://github.com/Barracuda09/SATPI"><img src="https://www.paypalobjects.com/en_US/NL/i/btn/btn_donateCC_LG.gif"/></a>
-
-Contact
--------
-If you like to contact me, you can do so by sending an email to:
-
-    mpostema09 -at- gmail.com
-
-Tested Programs
----------------
-- Tvheadend: this is a TV streaming server see: https://tvheadend.org/
-- DVBviewer Lite Edition. see http://www.satip.info/products
-- Elgato Sat>IP App for Android
-- VDR
-- satip-client for Enigma2 boxes
-- VLC <a href="http://satip.info/sites/satip/files/files/Microsoft%20Word%20-%20mini-howto_satip_with_vlc_v2.pdf">Howto</a>
-
-Tested Hardware
----------------
-- <a href="http://www.raspberrypi.org">Raspberry Pi</a>
-- <a href="http://www.beagleboard.org">BeagleBone Black</a>
-- <a href="http://www.orangepi.org">Orange Pi One with armbian</a>
-- <a href="https://shop.sundtek.de">Sundtek DVB-C/T/T2</a>
-- <a href="https://shop.sundtek.de">Sundtek SkyTV Ultimate Dual (2x DVB-S/S2/S2X)</a>
-- <a href="http://www.satip.info/sites/satip/files/files/DSR41IP_GB.pdf">Schwaiger DSR41IP</a> - Thanks to Axel Hartmann for kindly suppling this to me
-- DIGITALBOX IMPERIAL HD 6i - Thanks to <a href="https://www.apfutura.com">APfutura</a> for kindly suppling this to me
-- Anysee-S2(LP) STV090x Multistandard
-- HMP-Combo DVB-T2/C
-- <a href="http://www.vuplus.de">VU+ Zero 4K with DVB-S2X Tuner</a>
-- <a href="http://www.vuplus.de">VU+ Uno 4K with DVB-C FBC Tuner</a>
-- <a href="https://gigablue.de/produkte">GigaBlue UHD Quad 4K with DVB-S2X FBC Tuner</a> - Thanks to <a href="https://store.impex-sat.de">Impex-Sat GmbH & Co. KG</a> for kindly suppling this to me
-- <a href="https://gigablue.de/produkte">GigaBlue Ultra SCR-LNB / 24 SCR - 2 Legacy UHD 4K LNB</a> - Thanks to <a href="https://store.impex-sat.de">Impex-Sat GmbH & Co. KG</a> for kindly suppling this to me
-- <a href="https://www.durasat.de/LNB/DUR-line/DUR-line-UK-124-Unicable-LNB.html">DUR-line UK 124 - Unicable LNB</a>
-
-Build
------
-<a href="https://github.com/Barracuda09/SATPI/wiki/02.-Build-SatPI">See wiki on how to build SatPI</a>
-
-- Always Update the Web folder as well, as it may contain new features
-
-- To build SatPI just run these commands:
-
-    `git clone https://github.com/Barracuda09/satpi.git`<br/>
-    `cd satpi/`<br/>
-    `git branch -f devtmp 9c4b71d` -> _will make a branch devtmp of commit 9c4b71d_<br/>
-    `git checkout devtmp` -> _this will checkout devtmp_<br/>
-    <br/>
-    `git branch -a` -> see all available branches<br/>
-    `git branch` -> see on which branch you are working/building<br/>
-    `git checkout V1.6.2` -> to checkout (switch to) branch 'V1.6.2'<br/>
-    `make`<br/>
-
-- See some new commits/changes you need, rebuild with:
-
-    `cd satpi`<br/>
-    `git pull`<br/>
-    `make`<br/>
-
-- If you need to make a debug version to help with testing, use:
-
-    `make debug`<br/>
-
-- If you need to clean the project (because there was something wrong), use:
-
-    `make clean`<br/>
-
-- If you like to try OSCam with DVBAPI, use:
-
-    `make debug LIBDVBCSA=yes`<br/>
-
-- If you like to try OSCam with DVBAPI and ICAM, use:
-
-    `make debug LIBDVBCSA=yes ICAM=yes`<br/>
-
-- If you like to run it on an Enigma2 box **_(With the correct toolchain)_**, use:
-
-    `make debug ENIGMA=yes`<br/>
-
-- Here is an toolchain I use for Vu+ Receivers (Broadcom CPU) it has MIPS and ARM cross-compiler:
-
-    `https://github.com/Broadcom/stbgcc-6.3/releases`<br/>
-
-- If you see building errors, then perhaps your toolchain is not C++17 compatible. In this case try this before compiling:
-
-    `make non-c++17`<br/>
-
-- If you like to build the documentation, use:
-
-    `make docu   (!! you need Doxygen and Graphviz/dot !!)`<br/>
-
-Usage
------
-For help on options:
-
-    ./satpi --help
-
-For normal use just run:
-
-    ./satpi   (!!Note you should have the appropriate privilege to open tcp/udp port 554!!)
+Fork maintained by **Logic Encoder** — https://logicencoder.com
