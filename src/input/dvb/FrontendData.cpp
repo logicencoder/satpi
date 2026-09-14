@@ -511,6 +511,20 @@ int FrontendData::getPilotTones() const {
 	return _pilot;
 }
 
+bool FrontendData::hasExplicitTuningHints() const {
+	base::MutexLock lock(_mutex);
+	return _pilot != PILOT_AUTO || _fec != FEC_AUTO || _rolloff != ROLLOFF_AUTO;
+}
+
+void FrontendData::relaxTuningHints() {
+	base::MutexLock lock(_mutex);
+	_pilot = PILOT_AUTO;
+	_fec = FEC_AUTO;
+	_rolloff = ROLLOFF_AUTO;
+	// Keep _modtype: on DVB-S2 drivers QAM_AUTO is not always a valid
+	// blind-search modulation, the delivery system already narrows the scan.
+}
+
 int FrontendData::getSpectralInversion() const {
 	base::MutexLock lock(_mutex);
 	return _inversion;

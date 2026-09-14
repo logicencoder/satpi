@@ -820,6 +820,34 @@ bool Frontend::tune() {
 	return false;
 }
 
+bool Frontend::waitForFrontendLock(base::StopWatch &sw) {
+	std::this_thread::sleep_for(std::chrono::milliseconds(150));
+	// check if frontend is locked, if not try a few times (Untill TIMEOUT)
+	for (int i = 1;; ++i) {
+		fe_status_t status = FE_TIMEDOUT;
+		// first read status
+		if (::ioctl(_fd_fe, FE_READ_STATUS, &status) == 0) {
+			if (status & FE_HAS_LOCK) {
+				// We are tuned now, add some tuning stats
+				_frontendData.setMonitorData(FE_HAS_LOCK, 100, 8, 0, 0);
+				SI_LOG_INFO("Frontend: @#1, Tuned and locked (FE status @#2)", _feID, HEX(status, 2));
+				return true;
+			}
+			if (i == 1) {
+				SI_LOG_INFO("Frontend: @#1, Not locked yet   (FE status @#2)...", _feID, HEX(status, 2));
+			}
+		} else {
+			SI_LOG_PERROR("Frontend: @#1, FE_READ_STATUS", _feID);
+		}
+		const unsigned long waitTime = sw.getIntervalMS();
+		if (waitTime > _waitOnLockTimeout) {
+			SI_LOG_INFO("Frontend: @#1, Not locked yet   (Timeout @#2 ms)...", _feID, waitTime);
+			return false;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(150));
+	}
+}
+
 bool Frontend::setupAndTune() {
 	if (!_tuned) {
 		base::StopWatch sw;
@@ -843,34 +871,28 @@ bool Frontend::setupAndTune() {
 		_tuned = true;
 		SI_LOG_INFO("Frontend: @#1, Tuned, waiting on lock...", _feID);
 		std::this_thread::sleep_for(std::chrono::milliseconds(300));
+		bool locked = false;
 		if (sw.getIntervalMS() < _waitOnLockTimeout) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(150));
-			// check if frontend is locked, if not try a few times (Untill TIMEOUT)
-			for (int i = 1;; ++i) {
-				fe_status_t status = FE_TIMEDOUT;
-				// first read status
-				if (::ioctl(_fd_fe, FE_READ_STATUS, &status) == 0) {
-					if (status & FE_HAS_LOCK) {
-						// We are tuned now, add some tuning stats
-						_frontendData.setMonitorData(FE_HAS_LOCK, 100, 8, 0, 0);
-						SI_LOG_INFO("Frontend: @#1, Tuned and locked (FE status @#2)", _feID, HEX(status, 2));
-						break;
-					}
-					if (i == 1) {
-						SI_LOG_INFO("Frontend: @#1, Not locked yet   (FE status @#2)...", _feID, HEX(status, 2));
-					}
-				} else {
-					SI_LOG_PERROR("Frontend: @#1, FE_READ_STATUS", _feID);
-				}
-				const unsigned long waitTime = sw.getIntervalMS();
-				if (waitTime > _waitOnLockTimeout) {
-					SI_LOG_INFO("Frontend: @#1, Not locked yet   (Timeout @#2 ms)...", _feID, waitTime);
-					break;
-				}
-				std::this_thread::sleep_for(std::chrono::milliseconds(150));
-			}
+			locked = waitForFrontendLock(sw);
 		} else {
 			SI_LOG_INFO("Frontend: @#1, Not locked yet   (Timeout @#2 ms)...", _feID, sw.getIntervalMS());
+		}
+		// Clients can forward stale channel list hints that prevent the demod
+		// from locking (e.g. DVBViewer sends 'plts=off' on pilots-on
+		// transponders; combined with an explicit 'fec' this restricts the
+		// demod search too much). Retry once with the hints relaxed to AUTO
+		// so the demod performs a full blind search.
+		if (!locked && _frontendData.hasExplicitTuningHints()) {
+			SI_LOG_INFO("Frontend: @#1, No lock with explicit hints, retuning with pilot/fec/rolloff set to auto...", _feID);
+			_frontendData.relaxTuningHints();
+			_tuned = false;
+			if (tune()) {
+				_tuned = true;
+				sw.start();
+				SI_LOG_INFO("Frontend: @#1, Tuned (auto retry), waiting on lock...", _feID);
+				std::this_thread::sleep_for(std::chrono::milliseconds(300));
+				waitForFrontendLock(sw);
+			}
 		}
 	}
 	return _tuned;
