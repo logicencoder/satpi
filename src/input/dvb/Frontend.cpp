@@ -281,6 +281,12 @@ bool Frontend::readTSPackets(mpegts::PacketBuffer& buffer) {
 		buffer.addAmountOfBytesWritten(readSize);
 		if (buffer.full()) {
 			_frontendData.getFilter().filterData(_feID, buffer, false);
+			// Full-TS emulation requests new pids while parsing PAT/PMT.
+			// NEXUS: DMX_ADD_PID on the live demux fd works mid-stream, so
+			// newly discovered pids are added without disturbing the feed.
+			if (_frontendData.getFilter().hasPIDTableChanged()) {
+				updatePIDFilters();
+			}
 
 			return true;
 		}
@@ -513,33 +519,50 @@ void Frontend::updatePIDFilters() {
 		// openPid lambda function
 		[&](const int pid) {
 			uint16_t p = pid;
+			// NEXUS driver crashes (NULL deref in NEXUS_Recpump_AddPidChannel)
+			// on pid >= 0x2000 - the SatPI "all PIDs" marker (8192). Never send
+			// it to the driver; the demux still passes the full TS once any
+			// filter is open (verified empirically on Vu+ Duo 4K SE).
+			if (p >= 0x2000) {
+				SI_LOG_INFO("Frontend: @#1, Skipping hardware filter for virtual PID @#2", _feID, PID(p));
+				return true;
+			}
 			// Check if we have already a DMX open
 			if (_fd_dmx == -1) {
-				// FBC workaround: two-step demux open (like Enigma2)
-				// Step 1: Open demux, set DMX_SET_SOURCE, close demux
-				std::ifstream infoVersionFile("/proc/stb/info/version");
-				if (infoVersionFile.is_open()) {
-					int fd_src = openDMX("/dev/dvb/adapter0/demux0");
-					if (fd_src >= 0) {
-						int n = DMX_SOURCE_FRONT0 + _index.getID();
-						if (::ioctl(fd_src, DMX_SET_SOURCE, &n) != 0) {
-							SI_LOG_PERROR("Frontend: @#1, Failed to set DMX_SET_SOURCE (Src: @#2)", _feID, n);
-						} else {
-							SI_LOG_INFO("Frontend: @#1, Set DMX_SET_SOURCE (Src: @#2) on temp fd", _feID, n);
-						}
-						::close(fd_src);
-					}
-				}
-				// Step 2: Open demux again, set PES filter
+				// NEXUS/Enigma2: DMX_SET_SOURCE must be set on the SAME fd that
+				// owns the filters - the binding does NOT survive close().
+				// A SET_SOURCE on a temp fd + PES filter on another fd starts
+				// the feed with no source -> driver recpump NULL deref (oops).
 				std::size_t timeout = 0;
-				while ((_fd_dmx = openDMX("/dev/dvb/adapter0/demux0")) == -1) {
+				while ((_fd_dmx = openDMX(_path_to_dmx)) == -1) {
 					std::this_thread::sleep_for(std::chrono::milliseconds(20));
 					++timeout;
 					if (timeout > 3) {
-						return false;
+						// fall back to shared demux0 (Enigma2 uses it too)
+						_fd_dmx = openDMX("/dev/dvb/adapter0/demux0");
+						if (_fd_dmx == -1) {
+							return false;
+						}
+						break;
 					}
 				}
-				SI_LOG_INFO("Frontend: @#1, Opened /dev/dvb/adapter0/demux0 using fd: @#2", _feID, _fd_dmx);
+				SI_LOG_INFO("Frontend: @#1, Opened @#2 using fd: @#3", _feID, _path_to_dmx, _fd_dmx);
+				// Do we run on a Set-Top Box with Enigma2, then we need to set
+				// DMX_SET_SOURCE on the same fd that owns the filters
+				std::ifstream infoVersionFile("/proc/stb/info/version");
+				if (infoVersionFile.is_open()) {
+					int offset = 0;
+					std::ifstream offsetFile("/proc/stb/frontend/dvr_source_offset");
+					if (offsetFile.is_open()) {
+						offsetFile >> offset;
+					}
+					int n = DMX_SOURCE_FRONT0 + _index.getID();
+					if (::ioctl(_fd_dmx, DMX_SET_SOURCE, &n) != 0) {
+						SI_LOG_PERROR("Frontend: @#1, Failed to set DMX_SET_SOURCE with (Src: @#2 - Offset: @#3)", _feID, n, offset);
+						return false;
+					}
+					SI_LOG_INFO("Frontend: @#1, Set DMX_SET_SOURCE with (Src: @#2 - Offset: @#3)", _feID, n, offset);
+				}
 				if (_dvrBufferSizeMB > 0) {
 					const unsigned int size = _dvrBufferSizeMB * 1024 * 1024;
 					if (::ioctl(_fd_dmx, DMX_SET_BUFFER_SIZE, size) != 0) {

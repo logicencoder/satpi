@@ -31,6 +31,7 @@
 #include <decrypt/dvbapi/ClientProperties.h>
 #endif
 
+#include <chrono>
 #include <string>
 
 FW_DECL_NS1(input, DeviceData);
