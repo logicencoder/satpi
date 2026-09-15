@@ -12,6 +12,10 @@ open since 2024). Verified end-to-end on OpenPLi 9.2 with **DVBViewer**
 switching three orbital positions (23.5E / 13E / 19.2E) while Enigma2 runs
 alongside.
 
+**Read the full investigation** — first-hand write-up with measurements,
+packet captures and the driver-level details:
+[Fixing SatPI on the Vu+ Duo 4K SE: FBC tuners, DiSEqC and DVBViewer](https://logicencoder.com/satpi-vu-plus-duo-4k-se-fbc-diseqc-dvbviewer/)
+
 ## What this fork fixes
 
 | Area | Fix |
